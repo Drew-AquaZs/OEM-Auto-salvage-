@@ -1,0 +1,6 @@
+{
+  "name": "OEM Salvage Target List & Arbitrage Planner",
+  "description": "High-profit yard target list for 2000-2015 Japanese and German sedans and coupes, featuring fast-pull OEM lists, failure reason lookups, specific tool trackers, and interchange compatibility mapping.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

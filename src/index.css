@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@media print {
+  @page {
+    margin: 1cm;
+    size: auto;
+  }
+  
+  body {
+    background-color: white !important;
+    color: black !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Force background colors on tags to print correctly */
+  * {
+    color: black !important;
+  }
+  
+  /* Hide the root app structure and only show the #yard-pull-plan-view */
+  header, nav, footer {
+    display: none !important;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+}
