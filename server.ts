@@ -1,4 +1,4 @@
-import express from "express";
+import express, { NextFunction, Request, Response } from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
@@ -11,7 +11,65 @@ const app = express();
 const PORT = 3000;
 
 // Body parsing middleware
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
+
+const GEMINI_RATE_WINDOW_MS = 60_000;
+const GEMINI_RATE_MAX_REQUESTS = Number(process.env.GEMINI_RATE_MAX_REQUESTS || 30);
+const GEMINI_MAX_BODY_BYTES = Number(process.env.GEMINI_MAX_BODY_BYTES || 50_000);
+const geminiRateBuckets = new Map<string, number[]>();
+
+const getClientIp = (req: Request) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || "unknown";
+};
+
+const geminiRateLimitMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const now = Date.now();
+  const ip = getClientIp(req);
+  const existing = geminiRateBuckets.get(ip) || [];
+  const recent = existing.filter((timestamp) => now - timestamp < GEMINI_RATE_WINDOW_MS);
+
+  if (recent.length >= GEMINI_RATE_MAX_REQUESTS) {
+    return res.status(429).json({
+      success: false,
+      error: "Rate limit exceeded. Please wait a minute before retrying.",
+    });
+  }
+
+  recent.push(now);
+  geminiRateBuckets.set(ip, recent);
+  next();
+};
+
+const geminiBodyLimitMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const bodySize = Buffer.byteLength(JSON.stringify(req.body || {}), "utf8");
+  if (bodySize > GEMINI_MAX_BODY_BYTES) {
+    return res.status(413).json({
+      success: false,
+      error: "Request body is too large for this endpoint.",
+    });
+  }
+  next();
+};
+
+const validateShortText = (value: unknown, fieldName: string, maxLength = 200): string | null => {
+  if (typeof value !== "string") {
+    return `${fieldName} must be a string.`;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return `${fieldName} is required.`;
+  }
+  if (trimmed.length > maxLength) {
+    return `${fieldName} must be <= ${maxLength} characters.`;
+  }
+  return null;
+};
+
+app.use("/api/gemini", geminiRateLimitMiddleware, geminiBodyLimitMiddleware);
 
 // Initialize Gemini Client safely
 // Check if key is available
@@ -92,8 +150,9 @@ app.get("/api/presets", (req, res) => {
 app.post("/api/gemini/lookup", async (req, res) => {
   const { query } = req.body;
 
-  if (!query || typeof query !== "string") {
-    return res.status(400).json({ success: false, error: "Query parameter is required and must be a string." });
+  const queryValidation = validateShortText(query, "query", 160);
+  if (queryValidation) {
+    return res.status(400).json({ success: false, error: queryValidation });
   }
 
   try {
@@ -194,12 +253,36 @@ Break it down into the top 3 most valuable, fast-pull parts. Mapped to the reque
 app.post("/api/gemini/parse-drop", async (req, res) => {
   const { rawString, knownChassis } = req.body;
 
-  if (!rawString || typeof rawString !== "string") {
-    return res.status(400).json({ success: false, error: "rawString parameter is required and must be a string." });
+  const rawStringValidation = validateShortText(rawString, "rawString", 600);
+  if (rawStringValidation) {
+    return res.status(400).json({ success: false, error: rawStringValidation });
   }
 
   try {
     const ai = getGeminiClient();
+    const knownChassisSummary = Array.isArray(knownChassis)
+      ? knownChassis.slice(0, 25).map((item) => {
+          const record = item as {
+            make?: string;
+            model?: string;
+            chassisCode?: string;
+            years?: number[];
+            targetParts?: Array<{ name?: string }>;
+          };
+          return {
+            make: record.make || "Unknown",
+            model: record.model || "Unknown",
+            chassisCode: record.chassisCode || "N/A",
+            years: Array.isArray(record.years) ? record.years.slice(0, 8) : [],
+            targetPartNames: Array.isArray(record.targetParts)
+              ? record.targetParts
+                  .map((part) => part?.name)
+                  .filter((name): name is string => typeof name === "string")
+                  .slice(0, 5)
+              : [],
+          };
+        })
+      : [];
 
     const systemInstruction = `You are a strict data parsing engine and Hollander interchange cross-reference tool. 
 You process abbreviated and misspelled vehicle arrivals at salvage yards (e.g. "07 NISS MAXM BRN Row 14"). 
@@ -215,7 +298,7 @@ Your objective:
 Do not include any conversational filler. Only output JSON matching the required schema.`;
 
     const prompt = `Analyze this raw yard drop text: "${rawString}". 
-Cross-reference this vehicle against high-value parts (like those matching target models in our database: ${JSON.stringify(knownChassis || [])} or classic high-value components for this specific car). Output the precise JSON format requested.`;
+Cross-reference this vehicle against high-value parts (like those matching target models in our database: ${JSON.stringify(knownChassisSummary)} or classic high-value components for this specific car). Output the precise JSON format requested.`;
 
     const response = await generateContentWithModelCascade(ai, {
       contents: prompt,
@@ -296,10 +379,13 @@ app.post("/api/gemini/generate-listing", async (req, res) => {
     customNotes 
   } = req.body;
 
-  if (!partName || !make || !model) {
+  const partNameValidation = validateShortText(partName, "partName", 140);
+  const makeValidation = validateShortText(make, "make", 80);
+  const modelValidation = validateShortText(model, "model", 120);
+  if (partNameValidation || makeValidation || modelValidation) {
     return res.status(400).json({ 
       success: false, 
-      error: "partName, make, and model are required fields." 
+      error: partNameValidation || makeValidation || modelValidation
     });
   }
 
@@ -519,6 +605,16 @@ Contact with your phone number or message through the app to arrange pickup.`,
 // 5. Real-Time Market Insights via Search Grounding
 app.post("/api/gemini/market-insights", async (req, res) => {
   const { segment = "All Platforms / Universal Flips", customQuery } = req.body;
+  const segmentValidation = validateShortText(segment, "segment", 120);
+  if (segmentValidation) {
+    return res.status(400).json({ success: false, error: segmentValidation });
+  }
+  if (customQuery !== undefined) {
+    const customQueryValidation = validateShortText(customQuery, "customQuery", 220);
+    if (customQueryValidation) {
+      return res.status(400).json({ success: false, error: customQueryValidation });
+    }
+  }
 
   try {
     const ai = getGeminiClient();
@@ -756,8 +852,11 @@ Format the final output cleanly as valid JSON containing an array "trendingParts
 app.post("/api/gemini/extraction-guide", async (req, res) => {
   const { partName, make, model, chassisCode, years, toolsNeeded = [], failureMode } = req.body;
 
-  if (!partName || !make || !model) {
-    return res.status(400).json({ success: false, error: "partName, make, and model are required." });
+  const partNameValidation = validateShortText(partName, "partName", 140);
+  const makeValidation = validateShortText(make, "make", 80);
+  const modelValidation = validateShortText(model, "model", 120);
+  if (partNameValidation || makeValidation || modelValidation) {
+    return res.status(400).json({ success: false, error: partNameValidation || makeValidation || modelValidation });
   }
 
   try {
@@ -924,7 +1023,8 @@ Output strict JSON with:
 
 // 7. Real-Time Yard Inventory Alert System Engine
 app.post("/api/gemini/inventory-alerts", async (req, res) => {
-  const { planItems = [] } = req.body;
+  const rawPlanItems = req.body?.planItems;
+  const planItems = Array.isArray(rawPlanItems) ? rawPlanItems.slice(0, 100) : [];
 
   if (!planItems || planItems.length === 0) {
     return res.json({ success: true, alerts: [] });
@@ -1017,9 +1117,9 @@ Return a JSON array of active alerts for parts that have significant market pric
   const dynamicAlerts = planItems.slice(0, 3).map((item: any, idx: number) => {
     const origVal = item.part.estValue || 150;
     const isSurge = idx % 2 === 0;
-    const shiftMultiplier = isSurge ? 1.28 : 1.15;
-    const currVal = Math.round(origVal * shiftMultiplier);
-    const pct = Math.round((shiftMultiplier - 1) * 100);
+    const shiftMultiplier = isSurge ? 1.28 : 0.82;
+    const currVal = Math.max(1, Math.round(origVal * shiftMultiplier));
+    const pct = Math.round(Math.abs((shiftMultiplier - 1) * 100));
 
     return {
       id: `alert-${item.id}-${Date.now()}-${idx}`,
@@ -1029,9 +1129,11 @@ Return a JSON array of active alerts for parts that have significant market pric
       originalValue: origVal,
       currentValue: currVal,
       shiftPct: pct,
-      shiftDirection: "SURGE",
-      reason: `Surge in enthusiast forum swap demand and OEM warehouse stock depletion has driven secondary market sales up +${pct}%.`,
-      marketTrigger: "Enthusiast Forum Demand Surge",
+      shiftDirection: isSurge ? "SURGE" : "DROP",
+      reason: isSurge
+        ? `Surge in enthusiast forum swap demand and OEM warehouse stock depletion has driven secondary market sales up +${pct}%.`
+        : `Recent oversupply and slower seasonal demand has pushed secondary market pricing down -${pct}%.`,
+      marketTrigger: isSurge ? "Enthusiast Forum Demand Surge" : "Seasonal Oversupply Correction",
       timestamp: nowStr,
       isRead: false
     };
@@ -1305,8 +1407,9 @@ function generatePartSvg(
 app.post("/api/gemini/generate-part-image", async (req, res) => {
   const { partType, make, model, angle, overlayTag } = req.body;
 
-  if (!partType || typeof partType !== "string") {
-    return res.status(400).json({ success: false, error: "partType parameter is required." });
+  const partTypeValidation = validateShortText(partType, "partType", 120);
+  if (partTypeValidation) {
+    return res.status(400).json({ success: false, error: partTypeValidation });
   }
 
   const cleanPart = partType.trim();

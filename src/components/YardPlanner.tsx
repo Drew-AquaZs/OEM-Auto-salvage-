@@ -25,7 +25,7 @@ import { YardInventoryAlerts } from "./YardInventoryAlerts";
 
 interface YardPlannerProps {
   planItems: YardPlanItem[];
-  onRemoveItem: (partName: string) => void;
+  onRemoveItem: (planItemId: string) => void;
   onClearPlan: () => void;
   onCreateListing?: (item: YardPlanItem) => void;
   onUpdateItemValue?: (planItemId: string, newValue: number) => void;
@@ -424,7 +424,7 @@ export default function YardPlanner({
 
                         <button
                           type="button"
-                          onClick={() => onRemoveItem(item.part.name)}
+                          onClick={() => onRemoveItem(item.id)}
                           className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-500 hover:text-red-400 p-2 rounded-xl hover:bg-zinc-800 border border-zinc-800 sm:border-transparent transition-colors"
                           title="Remove from plan"
                         >
