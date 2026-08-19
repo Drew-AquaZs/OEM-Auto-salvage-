@@ -48,7 +48,7 @@ interface ListingGeneratorSectionProps {
     chassis: Chassis;
   } | null;
   onClearInitialPart?: () => void;
-  onListingSaved?: (partName: string) => void;
+  onListingSaved?: (partName: string, chassisId?: string) => void;
 }
 
 export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = ({
@@ -292,7 +292,7 @@ export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = (
     
     if (onListingSaved) {
       const partName = mode === "preset" ? selectedPartName : customPartName;
-      onListingSaved(partName);
+      onListingSaved(partName, mode === "preset" ? selectedChassisId : undefined);
     }
   };
 

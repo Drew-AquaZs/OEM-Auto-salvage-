@@ -16,7 +16,7 @@ interface YardDropParserSectionProps {
 }
 
 interface ParsedDropResult {
-  Yard_Row: string;
+  Row: string;
   Clean_Vehicle_Name: string;
   Actionable_Hit: boolean;
   Part_To_Pull: string;
@@ -86,7 +86,7 @@ export default function YardDropParserSection({
           ? "Japanese"
           : "German",
       cleanVehicleName: result.Clean_Vehicle_Name,
-      yardRow: result.Yard_Row,
+      yardRow: result.Row,
     });
 
     setSaved(true);
@@ -179,7 +179,7 @@ export default function YardDropParserSection({
             <div>
               <div className="flex items-center gap-2 text-xs font-mono text-blue-400 font-bold">
                 <MapPin className="w-3.5 h-3.5" />
-                <span>LOCATION: {result.Yard_Row || "Unspecified Row"}</span>
+                <span>LOCATION: {result.Row || "Unspecified Row"}</span>
               </div>
               <h4 className="text-lg font-bold text-white mt-1">
                 {result.Clean_Vehicle_Name}

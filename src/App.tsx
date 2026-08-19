@@ -76,8 +76,8 @@ export default function App() {
     savePlan([...yardPlan, newItem]);
   };
 
-  const handleRemovePart = (partName: string) => {
-    const next = yardPlan.filter((item) => item.part.name !== partName);
+  const handleRemovePart = (planItemId: string) => {
+    const next = yardPlan.filter((item) => item.id !== planItemId);
     savePlan(next);
   };
 
@@ -92,8 +92,9 @@ export default function App() {
     savePlan(next);
   };
 
-  const isPartSelected = (partName: string) => {
-    return yardPlan.some((item) => item.part.name === partName);
+  const isPartSelected = (chassisId: string, partName: string) => {
+    const planItemId = `${chassisId}_${partName}`;
+    return yardPlan.some((item) => item.id === planItemId);
   };
 
   const handleCreateListing = (chassis: Chassis, part: TargetPart) => {
@@ -122,17 +123,18 @@ export default function App() {
     setActiveTab("listings");
   };
 
-  const handleListingSaved = (partName: string) => {
-    // If it exists in the plan, mark it as listed
+  const handleListingSaved = (partName: string, chassisId?: string) => {
+    if (!chassisId) return;
+    const targetId = `${chassisId}_${partName}`;
     const next = yardPlan.map((item) => 
-      item.part.name === partName ? { ...item, status: "listed" as const } : item
+      item.id === targetId ? { ...item, status: "listed" as const } : item
     );
     savePlan(next);
   };
 
   const handleUpdateItemValue = (planItemId: string, newValue: number) => {
     const next = yardPlan.map((item) => {
-      if (item.id === planItemId || item.part.name === planItemId) {
+      if (item.id === planItemId) {
         return {
           ...item,
           part: {
@@ -485,8 +487,8 @@ export default function App() {
                     key={chassis.id}
                     chassis={chassis}
                     onAddPart={(part) => handleAddPart(chassis, part)}
-                    onRemovePart={(partName) => handleRemovePart(partName)}
-                    isPartSelected={isPartSelected}
+                    onRemovePart={(partName) => handleRemovePart(`${chassis.id}_${partName}`)}
+                    isPartSelected={(partName) => isPartSelected(chassis.id, partName)}
                     selectedCategory={selectedCategory}
                     selectedTool={selectedTool}
                     onCreateListing={handleCreateListing}
@@ -537,7 +539,7 @@ export default function App() {
             chassisList={chassisList}
             onAddPartToPlan={handleAddPartFromMarketInsights}
             onCreateListing={handleCreateListing}
-            isPartInPlan={isPartSelected}
+            isPartInPlan={(partName) => yardPlan.some((item) => item.part.name === partName)}
           />
         )}
       </main>
