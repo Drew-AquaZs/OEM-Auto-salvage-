@@ -45,20 +45,27 @@ export default function App() {
 
   // Load saved plan from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem("salvage_yard_plan");
-    if (saved) {
-      try {
-        setYardPlan(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to parse saved plan:", e);
+    try {
+      const saved = localStorage.getItem("salvage_yard_plan");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setYardPlan(parsed.filter((item) => item && typeof item.id === "string" && item.part));
+        }
       }
+    } catch (e) {
+      console.error("Failed to load saved plan:", e);
     }
   }, []);
 
   // Save plan to localStorage
   const savePlan = (newPlan: YardPlanItem[]) => {
     setYardPlan(newPlan);
-    localStorage.setItem("salvage_yard_plan", JSON.stringify(newPlan));
+    try {
+      localStorage.setItem("salvage_yard_plan", JSON.stringify(newPlan));
+    } catch (e) {
+      console.error("Failed to persist plan:", e);
+    }
   };
 
   const handleAddPart = (chassis: Chassis, part: TargetPart) => {
