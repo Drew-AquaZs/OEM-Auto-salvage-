@@ -49,7 +49,16 @@ export function YardInventoryAlerts({
       const response = await fetch("/api/gemini/inventory-alerts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planItems: items })
+        // Send only the fields the server uses to stay well under the request size limit
+        body: JSON.stringify({
+          planItems: items.slice(0, 100).map((item) => ({
+            id: item.id,
+            chassisMake: item.chassisMake,
+            chassisModel: item.chassisModel,
+            chassisCode: item.chassisCode,
+            part: { name: item.part.name, category: item.part.category, estValue: item.part.estValue }
+          }))
+        })
       });
 
       const contentType = response.headers.get("content-type") || "";

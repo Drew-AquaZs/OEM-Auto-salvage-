@@ -1,7 +1,5 @@
 import React, { useState } from "react";
 import { YardPlanItem } from "../types";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 import { 
   ClipboardList, 
   Wrench, 
@@ -118,9 +116,14 @@ export default function YardPlanner({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const exportToPDF = () => {
+  const exportToPDF = async () => {
     if (planItems.length === 0) return;
 
+    // Loaded on demand so the PDF libraries stay out of the initial bundle
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+      import("jspdf"),
+      import("jspdf-autotable"),
+    ]);
     const doc = new jsPDF();
     
     doc.setFontSize(18);
@@ -130,7 +133,7 @@ export default function YardPlanner({
       "[  ]",
       `${item.chassisMake} ${item.chassisModel}`,
       item.part.name,
-      item.part.toolsNeeded.join(", ")
+      (item.part.toolsNeeded ?? []).join(", ")
     ]);
 
     autoTable(doc, {

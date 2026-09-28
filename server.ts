@@ -1,14 +1,26 @@
 import express, { NextFunction, Request, Response } from "express";
 import path from "path";
 import dotenv from "dotenv";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { CUSTOM_PRESETS } from "./src/chassisData";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+// Trust the first proxy hop (Cloud Run / load balancer) so req.ip reflects the real client
+// without letting callers spoof X-Forwarded-For to dodge rate limiting.
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS ?? 1));
+app.disable("x-powered-by");
+
+// Baseline security headers
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
 
 // Body parsing middleware
 app.use(express.json({ limit: "256kb" }));
@@ -18,13 +30,17 @@ const GEMINI_RATE_MAX_REQUESTS = Number(process.env.GEMINI_RATE_MAX_REQUESTS || 
 const GEMINI_MAX_BODY_BYTES = Number(process.env.GEMINI_MAX_BODY_BYTES || 50_000);
 const geminiRateBuckets = new Map<string, number[]>();
 
-const getClientIp = (req: Request) => {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0].trim();
+const getClientIp = (req: Request) => req.ip || req.socket.remoteAddress || "unknown";
+
+// Evict stale rate-limit buckets so the map doesn't grow without bound
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, timestamps] of geminiRateBuckets) {
+    if (timestamps.every((timestamp) => now - timestamp >= GEMINI_RATE_WINDOW_MS)) {
+      geminiRateBuckets.delete(ip);
+    }
   }
-  return req.ip || "unknown";
-};
+}, GEMINI_RATE_WINDOW_MS).unref();
 
 const geminiRateLimitMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const now = Date.now();
@@ -69,7 +85,30 @@ const validateShortText = (value: unknown, fieldName: string, maxLength = 200): 
   return null;
 };
 
+const optionalText = (value: unknown, maxLength = 200): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLength) : undefined;
+};
+
+const toStringList = (value: unknown, maxItems = 20, maxLength = 80): string[] =>
+  Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .slice(0, maxItems)
+        .map((item) => item.trim().slice(0, maxLength))
+    : [];
+
+const escapeXml = (value: string) =>
+  value.replace(/[<>&'"]/g, (char) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[char] as string
+  );
+
 app.use("/api/gemini", geminiRateLimitMiddleware, geminiBodyLimitMiddleware);
+
+app.get("/api/health", (_req, res) => {
+  res.json({ success: true, status: "ok", geminiConfigured: Boolean(process.env.GEMINI_API_KEY) });
+});
 
 // Initialize Gemini Client safely
 // Check if key is available
@@ -90,6 +129,13 @@ const getGeminiClient = () => {
   });
 };
 
+// Model cascade is overridable via GEMINI_MODELS="model-a,model-b" without a code change
+const DEFAULT_TEXT_MODELS = (process.env.GEMINI_MODELS || "gemini-3.7-flash,gemini-3.1-flash-lite")
+  .split(",")
+  .map((model) => model.trim())
+  .filter(Boolean);
+const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-lite-image";
+
 // Resilient multi-tier Gemini model cascade helper to eliminate 429 quota exhaustion and 503 unavailability
 async function generateContentWithModelCascade(
   ai: GoogleGenAI,
@@ -99,10 +145,7 @@ async function generateContentWithModelCascade(
     preferredModels?: string[];
   }
 ) {
-  const modelQueue = requestPayload.preferredModels || [
-    "gemini-3.7-flash",
-    "gemini-3.1-flash-lite"
-  ];
+  const modelQueue = requestPayload.preferredModels || DEFAULT_TEXT_MODELS;
 
   let lastError: any = null;
 
@@ -119,7 +162,10 @@ async function generateContentWithModelCascade(
     } catch (err: any) {
       lastError = err;
       const msg = err?.message || "";
+      const status = Number(err?.status ?? err?.code);
       const isQuotaOrUnavailable =
+        status === 429 ||
+        status === 503 ||
         msg.includes("429") ||
         msg.includes("503") ||
         msg.includes("RESOURCE_EXHAUSTED") ||
@@ -639,7 +685,6 @@ Format the final output cleanly as valid JSON containing an array "trendingParts
 
     const response = await generateContentWithModelCascade(ai, {
       contents: prompt,
-      preferredModels: ["gemini-3.7-flash", "gemini-3.1-flash-lite"],
       config: {
         tools: [{ googleSearch: {} }]
       }
@@ -850,7 +895,8 @@ Format the final output cleanly as valid JSON containing an array "trendingParts
 
 // 6. Extraction Quick Guide Pop-up with Tool Matching & Safety Warnings
 app.post("/api/gemini/extraction-guide", async (req, res) => {
-  const { partName, make, model, chassisCode, years, toolsNeeded = [], failureMode } = req.body;
+  const { partName, make, model, chassisCode, years, failureMode } = req.body;
+  const toolsNeeded = toStringList(req.body?.toolsNeeded);
 
   const partNameValidation = validateShortText(partName, "partName", 140);
   const makeValidation = validateShortText(make, "make", 80);
@@ -869,7 +915,7 @@ Include critical salvage yard safety warnings (hazards like sharp metal edges, e
     const prompt = `Generate a concise, field-tested extraction quick guide for:
 - Vehicle: ${make} ${model} (${chassisCode || "N/A"}) [${Array.isArray(years) ? years.join(", ") : years || "OEM"}]
 - Target Part: ${partName}
-- Tools Needed: ${toolsNeeded.join(", ")}
+- Tools Needed: ${toolsNeeded.join(", ") || "Standard hand tools"}
 - Common Failure / Wear Context: ${failureMode || "Factory replacement"}
 
 Output strict JSON with:
@@ -960,7 +1006,7 @@ Output strict JSON with:
       partName: partName,
       vehicle: `${make} ${model} ${chassisCode ? `[${chassisCode}]` : ""}`,
       estimatedTimeMin: 12,
-      difficultyRating: "Moderate (10-15m)",
+      difficultyRating: "Moderate (10-20m)",
       stepByStepInstructions: [
         {
           stepNumber: 1,
@@ -1024,7 +1070,19 @@ Output strict JSON with:
 // 7. Real-Time Yard Inventory Alert System Engine
 app.post("/api/gemini/inventory-alerts", async (req, res) => {
   const rawPlanItems = req.body?.planItems;
-  const planItems = Array.isArray(rawPlanItems) ? rawPlanItems.slice(0, 100) : [];
+  const planItems = (Array.isArray(rawPlanItems) ? rawPlanItems.slice(0, 100) : [])
+    .filter((item: any) => item && typeof item.id === "string" && item.part && typeof item.part.name === "string")
+    .map((item: any) => ({
+      id: item.id.slice(0, 200),
+      chassisMake: optionalText(item.chassisMake, 80) || "Unknown",
+      chassisModel: optionalText(item.chassisModel, 120) || "Unknown",
+      chassisCode: optionalText(item.chassisCode, 40) || "N/A",
+      part: {
+        name: item.part.name.slice(0, 140),
+        category: optionalText(item.part.category, 80) || "General",
+        estValue: Number.isFinite(Number(item.part.estValue)) ? Math.max(0, Number(item.part.estValue)) : 0,
+      },
+    }));
 
   if (!planItems || planItems.length === 0) {
     return res.json({ success: true, alerts: [] });
@@ -1033,7 +1091,7 @@ app.post("/api/gemini/inventory-alerts", async (req, res) => {
   try {
     const ai = getGeminiClient();
 
-    const planSummary = planItems.map((item: any) => ({
+    const planSummary = planItems.map((item) => ({
       id: item.id,
       partName: item.part.name,
       vehicle: `${item.chassisMake} ${item.chassisModel} (${item.chassisCode})`,
@@ -1114,7 +1172,7 @@ Return a JSON array of active alerts for parts that have significant market pric
 
   // Dynamic fallback generator based on plan items
   const nowStr = new Date().toISOString();
-  const dynamicAlerts = planItems.slice(0, 3).map((item: any, idx: number) => {
+  const dynamicAlerts = planItems.slice(0, 3).map((item, idx) => {
     const origVal = item.part.estValue || 150;
     const isSurge = idx % 2 === 0;
     const shiftMultiplier = isSurge ? 1.28 : 0.82;
@@ -1151,9 +1209,9 @@ function generatePartSvg(
   overlayTag?: string
 ): string {
   const norm = partType.toLowerCase();
-  const vehicleLabel = `${(make || "OEM").toUpperCase()} ${(model || "REPLACEMENT").toUpperCase()}`;
-  const partTitle = partType.toUpperCase();
-  const badgeText = overlayTag || "OEM TESTED 100% WORKING";
+  const vehicleLabel = escapeXml(`${(make || "OEM").toUpperCase()} ${(model || "REPLACEMENT").toUpperCase()}`);
+  const partTitle = escapeXml(partType.toUpperCase());
+  const badgeText = escapeXml(overlayTag || "OEM TESTED 100% WORKING");
 
   // Dynamic schematic vector based on generic part type
   let partGraphic = "";
@@ -1405,7 +1463,11 @@ function generatePartSvg(
 
 // 7. Dynamic Gemini API route: Generate Marketplace Photo Placeholder for generic part types
 app.post("/api/gemini/generate-part-image", async (req, res) => {
-  const { partType, make, model, angle, overlayTag } = req.body;
+  const { partType } = req.body;
+  const make = optionalText(req.body?.make, 80);
+  const model = optionalText(req.body?.model, 120);
+  const angle = optionalText(req.body?.angle, 120);
+  const overlayTag = optionalText(req.body?.overlayTag, 40);
 
   const partTypeValidation = validateShortText(partType, "partType", 120);
   if (partTypeValidation) {
@@ -1424,7 +1486,7 @@ Angle: ${angleText}.
 The component is isolated on a clean matte dark charcoal studio tabletop background with soft rim lighting, showing pristine metal housings, clean electrical wire connectors, mounting tabs, and factory OEM barcode labels. High-end automotive parts catalog quality, realistic product shot, sharp details, centered composition.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite-image",
+      model: IMAGE_MODEL,
       contents: {
         parts: [{ text: prompt }]
       },
@@ -1468,9 +1530,25 @@ The component is isolated on a clean matte dark charcoal studio tabletop backgro
   });
 });
 
+// Unknown API routes return JSON 404s instead of falling through to the SPA shell
+app.use("/api", (_req, res) => {
+  res.status(404).json({ success: false, error: "API route not found." });
+});
+
+// Malformed JSON bodies and other middleware errors return JSON instead of an HTML stack trace
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return next(err);
+  const status = Number(err?.status || err?.statusCode) || 500;
+  res.status(status).json({
+    success: false,
+    error: status === 500 ? "Internal server error." : err?.message || "Request failed.",
+  });
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode...");
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1479,8 +1557,11 @@ async function startServer() {
   } else {
     console.log("Starting server in PRODUCTION mode...");
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    // Hashed build assets are safe to cache forever; everything else revalidates
+    app.use("/assets", express.static(path.join(distPath, "assets"), { maxAge: "1y", immutable: true }));
+    app.use(express.static(distPath, { index: false }));
+    app.get("*", (_req, res) => {
+      res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
@@ -1490,4 +1571,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error("Failed to start server:", error);
+  process.exit(1);
+});

@@ -99,7 +99,8 @@ export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = (
     try {
       const saved = localStorage.getItem("oem_salvage_saved_listings");
       if (saved) {
-        setSavedListings(JSON.parse(saved));
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setSavedListings(parsed);
       }
     } catch (e) {
       console.error("Failed to load saved listings", e);
@@ -277,6 +278,14 @@ export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = (
     setTimeout(() => setCopiedType(null), 2000);
   };
 
+  const persistSavedListings = (next: typeof savedListings) => {
+    try {
+      localStorage.setItem("oem_salvage_saved_listings", JSON.stringify(next));
+    } catch (e) {
+      console.error("Failed to persist saved listings", e);
+    }
+  };
+
   const handleSaveListing = () => {
     if (!listing) return;
     const newItem = {
@@ -287,7 +296,7 @@ export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = (
     };
     const next = [newItem, ...savedListings.slice(0, 19)];
     setSavedListings(next);
-    localStorage.setItem("oem_salvage_saved_listings", JSON.stringify(next));
+    persistSavedListings(next);
     copyToClipboard(listing.title, "saved");
     
     if (onListingSaved) {
@@ -299,7 +308,7 @@ export const ListingGeneratorSection: React.FC<ListingGeneratorSectionProps> = (
   const handleDeleteSaved = (id: string) => {
     const next = savedListings.filter(s => s.id !== id);
     setSavedListings(next);
-    localStorage.setItem("oem_salvage_saved_listings", JSON.stringify(next));
+    persistSavedListings(next);
   };
 
   // Image Generation Handler for Generic Part Types (e.g. alternator, headlight, ecu, etc.)
